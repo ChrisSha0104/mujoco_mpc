@@ -35,137 +35,225 @@ model = mujoco.MjModel.from_xml_path(str(model_path))
 # data
 data = mujoco.MjData(model)
 
-# renderer
-renderer = mujoco.Renderer(model)
 
-# %%
-# agent
-agent = agent_lib.Agent(task_id="Cartpole", model=model)
+with agent_lib.Agent(
+    server_binary_path=pathlib.Path(agent_lib.__file__).parent
+    / "mjpc"
+    / "ui_agent_server",
+    task_id="Cartpole",
+    model=model,
+) as agent:
 
-# weights
-agent.set_cost_weights({"Velocity": 0.15})
-print("Cost weights:", agent.get_cost_weights())
+  # renderer
+  renderer = mujoco.Renderer(model)
+  # %%
+  # agent
+  # agent = agent_lib.Agent(task_id="Cartpole", model=model)
 
-# parameters
-agent.set_task_parameter("Goal", -1.0)
-print("Parameters:", agent.get_task_parameters())
+  # weights
+  agent.set_cost_weights({"Velocity": 0.15})
+  print("Cost weights:", agent.get_cost_weights())
 
-# %%
-# rollout horizon
-T = 1500
+  # parameters
+  agent.set_task_parameter("Goal", -1.0)
+  print("Parameters:", agent.get_task_parameters())
 
-# trajectories
-qpos = np.zeros((model.nq, T))
-qvel = np.zeros((model.nv, T))
-ctrl = np.zeros((model.nu, T - 1))
-time = np.zeros(T)
+  # %%
+  # rollout horizon
+  T = 100
 
-# costs
-cost_total = np.zeros(T - 1)
-cost_terms = np.zeros((len(agent.get_cost_term_values()), T - 1))
+  # trajectories
+  qpos = np.zeros((model.nq, T))
+  qvel = np.zeros((model.nv, T))
+  ctrl = np.zeros((model.nu, T - 1))
+  time = np.zeros(T)
 
-# rollout
-mujoco.mj_resetData(model, data)
+  # costs
+  cost_total = np.zeros(T - 1)
+  cost_terms = np.zeros((len(agent.get_cost_term_values()), T - 1))
 
-# cache initial state
-qpos[:, 0] = data.qpos
-qvel[:, 0] = data.qvel
-time[0] = data.time
+  # rollout
+  mujoco.mj_resetData(model, data)
 
-# frames
-frames = []
-FPS = 1.0 / model.opt.timestep
+  # cache initial state
+  qpos[:, 0] = data.qpos
+  qvel[:, 0] = data.qvel
+  time[0] = data.time
 
-# simulate
-for t in range(T - 1):
-  if t % 100 == 0:
-    print("t = ", t)
+  # frames
+  frames = []
+  FPS = 1.0 / model.opt.timestep
+  data_collection = {
+      'x': [],
+      'v': [],
+      'theta': [],
+      'omega': [],
+      'F': [],
+      'time': []
+  }
+  # Initialize RLS parameters
+  n_params = 4
+  theta_hat = np.zeros(n_params)
+  P = np.eye(n_params) * 1000.0
+  lambda_factor = 0.99
 
-  # set planner state
-  agent.set_state(
-      time=data.time,
-      qpos=data.qpos,
-      qvel=data.qvel,
-      act=data.act,
-      mocap_pos=data.mocap_pos,
-      mocap_quat=data.mocap_quat,
-      userdata=data.userdata,
-  )
+  # simulate
+  for t in range(T - 1):
+    if t % 100 == 0:
+      print("t = ", t)
 
-  # run planner for num_steps
-  num_steps = 10
-  for _ in range(num_steps):
-    agent.planner_step()
+    # set planner state
+    agent.set_state(
+        time=data.time,
+        qpos=data.qpos,
+        qvel=data.qvel,
+        act=data.act,
+        mocap_pos=data.mocap_pos,
+        mocap_quat=data.mocap_quat,
+        userdata=data.userdata,
+    )
 
-  # set ctrl from agent policy
-  data.ctrl = agent.get_action()
-  ctrl[:, t] = data.ctrl
+    # run planner for num_steps
+    num_steps = 10
+    for _ in range(num_steps):
+      agent.planner_step()
 
-  # get costs
-  cost_total[t] = agent.get_total_cost()
-  for i, c in enumerate(agent.get_cost_term_values().items()):
-    cost_terms[i, t] = c[1]
+    # set ctrl from agent policy
+    data.ctrl = agent.get_action()
+    ctrl[:, t] = data.ctrl
+    
+    # get costs
+    cost_total[t] = agent.get_total_cost()
+    for i, c in enumerate(agent.get_cost_term_values().items()):
+      cost_terms[i, t] = c[1]
 
-  # step
-  mujoco.mj_step(model, data)
+    # step
+    mujoco.mj_step(model, data)
 
-  # cache
-  qpos[:, t + 1] = data.qpos
-  qvel[:, t + 1] = data.qvel
-  time[t + 1] = data.time
+    # Collect data for system identification
+    x_k = data.qpos[0]
+    theta_k = data.qpos[1]
+    v_k = data.qvel[0]
+    omega_k = data.qvel[1]
+    F_k = data.ctrl[0]
+    time_k = data.time
 
-  # render and save frames
-  renderer.update_scene(data)
-  pixels = renderer.render()
-  frames.append(pixels)
+    # Store data for finite differences (need previous values)
+    if t > 0:
+        # Compute accelerations using finite differences
+        dt = time_k - data_collection['time'][-1]
+        dot_v_k = (v_k - data_collection['v'][-1]) / dt
+        dot_omega_k = (omega_k - data_collection['omega'][-1]) / dt
 
-# reset
-agent.reset()
+        # Form regression vectors
+        g = -model.opt.gravity[2]  # Positive gravity magnitude
 
-# display video
-SLOWDOWN = 0.5
-media.show_video(frames, fps=SLOWDOWN * FPS)
+        # Equation 1
+        phi_1k = np.array([
+            dot_v_k,
+            g * theta_k,
+            -omega_k**2 * theta_k,
+            0.0
+        ])
+        y_1k = F_k
 
-# %%
-# plot position
-fig = plt.figure()
+        # Equation 2
+        phi_2k = np.array([
+            -g * theta_k,
+            -g * theta_k,
+            omega_k**2 * theta_k,
+            dot_omega_k
+        ])
+        y_2k = -F_k
 
-plt.plot(time, qpos[0, :], label="q0", color="blue")
-plt.plot(time, qpos[1, :], label="q1", color="orange")
+        # Stack the regression vectors and outputs
+        phi_k = np.vstack([phi_1k, phi_2k])
+        y_k = np.array([y_1k, y_2k])
 
-plt.legend()
-plt.xlabel("Time (s)")
-plt.ylabel("Configuration")
+        # RLS update for each equation
+        for i in range(2):  # For each equation
+            phi_i = phi_k[i].reshape(-1, 1)
+            y_i = y_k[i]
 
-# %%
-# plot velocity
-fig = plt.figure()
+            # Compute the gain vector
+            K = (P @ phi_i) / (lambda_factor + phi_i.T @ P @ phi_i)
 
-plt.plot(time, qvel[0, :], label="v0", color="blue")
-plt.plot(time, qvel[1, :], label="v1", color="orange")
+            # Update the parameter estimate
+            theta_hat = theta_hat + (K.flatten() * (y_i - phi_i.T @ theta_hat))
 
-plt.legend()
-plt.xlabel("Time (s)")
-plt.ylabel("Velocity")
+            # Update the covariance matrix
+            P = (P - K @ phi_i.T @ P) / lambda_factor
 
-# %%
-# plot control
-fig = plt.figure()
+    # Append data to the collection
+    data_collection['x'].append(x_k)
+    data_collection['theta'].append(theta_k)
+    data_collection['v'].append(v_k)
+    data_collection['omega'].append(omega_k)
+    data_collection['F'].append(F_k)
+    data_collection['time'].append(time_k)
 
-plt.plot(time[:-1], ctrl[0, :], color="blue")
+    # cache
+    qpos[:, t + 1] = data.qpos
+    qvel[:, t + 1] = data.qvel
+    time[t + 1] = data.time
 
-plt.xlabel("Time (s)")
-plt.ylabel("Control")
+    # render and save frames
+    renderer.update_scene(data)
+    pixels = renderer.render()
+    frames.append(pixels)
+  import numpy as np
+  from numpy.linalg import lstsq
+  # After simulation loop
+  m_c_est = theta_hat[0]
+  m_p_est = theta_hat[1]
+  m_p_l_est = theta_hat[2]
+  l_m_c_est = theta_hat[3]
+  # Estimate l from m_p_l_est and m_p_est
+  if m_p_est != 0:
+      l_est_from_mp = m_p_l_est / m_p_est
+  else:
+      l_est_from_mp = np.nan
 
-# %%
-# plot costs
-fig = plt.figure()
+  # Estimate l from l_m_c_est and m_c_est
+  if m_c_est != 0:
+      l_est_from_mc = l_m_c_est / m_c_est
+  else:
+      l_est_from_mc = np.nan
 
-for i, c in enumerate(agent.get_cost_term_values().items()):
-  plt.plot(time[:-1], cost_terms[i, :], label=c[0])
+  # Final estimate of l
+  if not np.isnan(l_est_from_mp) and not np.isnan(l_est_from_mc):
+      l_estimate_final = (l_est_from_mp + l_est_from_mc) / 2
+  elif not np.isnan(l_est_from_mp):
+      l_estimate_final = l_est_from_mp
+  else:
+      l_estimate_final = l_est_from_mc
+  print(f"Estimated m_c: {m_c_est}")#, True m_c: {true_m_c}")
+  print(f"Estimated m_p: {m_p_est}")#, True m_p: {true_m_p}")
+  print(f"Estimated l: {l_estimate_final}")#, True l: {true_l}")
+  # # Update the model parameters
+  # model.body_mass[model.body_name2id('cart')] = m_c_est
+  # model.body_mass[model.body_name2id('pole')] = m_p_est
 
-plt.plot(time[:-1], cost_total, label="Total (weighted)", color="black")
+  # # Update the length of the pole
+  # pole_geom_id = model.geom_name2id('pole_geom')
+  # model.geom_size[pole_geom_id][1] = l_estimate_final  # Update half-length
 
-plt.legend()
-plt.xlabel("Time (s)")
-plt.ylabel("Costs")
+  # # Recompile the model if necessary
+  # model = mujoco.MjModel.from_xml_path(str(model_path))
+  # data = mujoco.MjData(model)
+
+  # # Verify the estimates
+  # true_m_c = model.body_mass[model.body_name2id('cart')]
+  # true_m_p = model.body_mass[model.body_name2id('pole')]
+  # true_l = model.geom_size[pole_geom_id][1]
+
+  # print(f"Estimated m_c: {m_c_est}, True m_c: {true_m_c}")
+  # print(f"Estimated m_p: {m_p_est}, True m_p: {true_m_p}")
+  # print(f"Estimated l: {l_estimate_final}, True l: {true_l}")
+
+  # reset
+  agent.reset()
+
+  # display video
+  SLOWDOWN = 0.5
+  media.show_video(frames, fps=SLOWDOWN * FPS)
