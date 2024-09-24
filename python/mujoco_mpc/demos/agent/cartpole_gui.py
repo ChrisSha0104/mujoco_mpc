@@ -13,8 +13,18 @@
 # limitations under the License.
 
 import mujoco
-from mujoco_mpc import agent as agent_lib
 import pathlib
+# %%
+import matplotlib.pyplot as plt
+import mediapy as media
+import numpy as np
+import pathlib
+
+# set current directory: mujoco_mpc/python/mujoco_mpc
+from mujoco_mpc import agent as agent_lib
+
+# %matplotlib inline
+
 
 # Cartpole model
 model_path = (
@@ -31,5 +41,204 @@ with agent_lib.Agent(
     task_id="Cartpole",
     model=model,
 ) as agent:
-  while True:
-    pass
+
+  # data
+  data = mujoco.MjData(model)
+
+  # renderer
+  # renderer = mujoco.Renderer(model)
+
+  # %%
+  # agent
+  agent = agent_lib.Agent(task_id="Cartpole", model=model)
+
+  # weights
+  agent.set_cost_weights({"Velocity": 0.15})
+  print("Cost weights:", agent.get_cost_weights())
+
+  # parameters
+  agent.set_task_parameter("Goal", -1.0)
+  print("Parameters:", agent.get_task_parameters())
+
+  # %%
+  # rollout horizon
+  T = 1500
+
+  # trajectories
+  qpos = np.zeros((model.nq, T))
+  qvel = np.zeros((model.nv, T))
+  ctrl = np.zeros((model.nu, T - 1))
+  time = np.zeros(T)
+
+  # costs
+  cost_total = np.zeros(T - 1)
+  cost_terms = np.zeros((len(agent.get_cost_term_values()), T - 1))
+
+  # rollout
+  mujoco.mj_resetData(model, data)
+
+  # cache initial state
+  qpos[:, 0] = data.qpos
+  qvel[:, 0] = data.qvel
+  time[0] = data.time
+
+  # frames
+  frames = []
+  FPS = 1.0 / model.opt.timestep
+
+  # initialize mass and inertia from model data
+  theta_hat = np.array([model.body_mass[1],model.body_mass[2]]) # (cart mass, pole mass), pole length is: model.geom_size[4][1])
+  P = np.eye(2) * 1000
+  lambda_ = 0.98 
+  theta_buf = []
+
+  # simulate
+
+  for t in range(T - 1):
+    if t % 100 == 0:
+      print("t = ", t)
+
+    # set planner state
+    agent.set_state(
+        time=data.time,
+        qpos=data.qpos,
+        qvel=data.qvel,
+        act=data.act,
+        mocap_pos=data.mocap_pos,
+        mocap_quat=data.mocap_quat,
+        userdata=data.userdata,
+    )
+
+    # run planner for num_steps
+    num_steps = 10
+    for _ in range(num_steps):
+      agent.planner_step()
+
+    # set ctrl from agent policy
+    data.ctrl = agent.get_action()
+    ctrl[:, t] = data.ctrl
+
+    # get costs
+    cost_total[t] = agent.get_total_cost()
+    for i, c in enumerate(agent.get_cost_term_values().items()):
+      cost_terms[i, t] = c[1]
+
+    # get states for param est
+    qpos[:,t] = data.qpos # x position of the cart, angle of the pole
+    qvel[:,t] = data.qvel # velocity of the cart, angular velocity of the pole
+
+    # step
+    mujoco.mj_step(model, data)
+
+    F = data.ctrl[0]
+
+    X = np.array([
+        [F[i]
+          
+        ]])
+
+    import pdb
+    pdb.set_trace()
+    # calculate acceleration in x and theta
+    a_x = (data.qvel[0] - qvel[0,t]) / model.opt.timestep
+    a_theta = (data.qvel[1] - qvel[1,t]) / model.opt.timestep
+
+    # length of pole
+    L = model.geom_size[4][1]
+    g = 9.81
+
+    m = (L * (a_theta + g * np.sin(data.qpos[1]))) / (a_x + g * np.sin(data.qpos[1]))
+    M = (a_x - m * L * a_theta * np.cos(data.qpos[1]) + m * L * data.qvel[1] ** 2 * np.sin(data.qpos[1])) / a_x
+
+
+    phi = np.array([ctrl[0] - g, data.qfrc_actuator[3]])  # Thrust and torque inputs
+
+
+
+    # estimate param
+
+    P, theta_hat = agent.rls_update(P, theta_hat, y, phi, lambda_)
+
+
+
+    # Print estimated parameters
+
+    print(f"Estimated mass at step {i}: {theta_hat[0]}")
+
+    print(f"Estimated inertia at step {i}: {theta_hat[1]}")
+
+
+
+    # Adjust the mass and inertia
+
+    model.body_mass[1] *= theta_hat[0]/model.body_mass[1]    # Update the mass of the quadrotor body in the model
+
+    model.body_inertia[1] *= theta_hat[1]/model.body_inertia[1]  # Update the inertia of the quadrotor body
+
+
+
+    # cache
+
+    qpos[:, t + 1] = data.qpos
+
+    qvel[:, t + 1] = data.qvel
+
+    time[t + 1] = data.time
+
+
+
+    # render and save frames
+    # renderer.update_scene(data)
+    # pixels = renderer.render()
+    # frames.append(pixels)
+
+  # reset
+  agent.reset()
+
+  # display video
+  SLOWDOWN = 0.5
+  media.show_video(frames, fps=SLOWDOWN * FPS)
+
+  # %%
+  # plot position
+  fig = plt.figure()
+
+  plt.plot(time, qpos[0, :], label="q0", color="blue")
+  plt.plot(time, qpos[1, :], label="q1", color="orange")
+
+  plt.legend()
+  plt.xlabel("Time (s)")
+  plt.ylabel("Configuration")
+
+  # %%
+  # plot velocity
+  fig = plt.figure()
+
+  plt.plot(time, qvel[0, :], label="v0", color="blue")
+  plt.plot(time, qvel[1, :], label="v1", color="orange")
+
+  plt.legend()
+  plt.xlabel("Time (s)")
+  plt.ylabel("Velocity")
+
+  # %%
+  # plot control
+  fig = plt.figure()
+
+  plt.plot(time[:-1], ctrl[0, :], color="blue")
+
+  plt.xlabel("Time (s)")
+  plt.ylabel("Control")
+
+  # %%
+  # plot costs
+  fig = plt.figure()
+
+  for i, c in enumerate(agent.get_cost_term_values().items()):
+    plt.plot(time[:-1], cost_terms[i, :], label=c[0])
+
+  plt.plot(time[:-1], cost_total, label="Total (weighted)", color="black")
+
+  plt.legend()
+  plt.xlabel("Time (s)")
+  plt.ylabel("Costs")
