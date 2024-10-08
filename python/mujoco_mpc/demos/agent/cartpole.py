@@ -45,7 +45,7 @@ with agent_lib.Agent(
 ) as agent:
 
   # renderer
-  renderer = mujoco.Renderer(model)
+  # renderer = mujoco.Renderer(model)
   # %%
   # agent
   # agent = agent_lib.Agent(task_id="Cartpole", model=model)
@@ -197,10 +197,10 @@ with agent_lib.Agent(
     qvel[:, t + 1] = data.qvel
     time[t + 1] = data.time
 
-    # render and save frames
-    renderer.update_scene(data)
-    pixels = renderer.render()
-    frames.append(pixels)
+    # # render and save frames
+    # renderer.update_scene(data)
+    # pixels = renderer.render()
+    # frames.append(pixels)
   import numpy as np
   from numpy.linalg import lstsq
   # After simulation loop

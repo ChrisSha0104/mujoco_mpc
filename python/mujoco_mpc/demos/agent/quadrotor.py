@@ -6,141 +6,168 @@ import matplotlib.pyplot as plt
 import mediapy as media
 
 # Load the MuJoCo environment (assuming you have a quadrotor model XML file)
-model_path = (
-    pathlib.Path(__file__).parent.parent.parent
-    / "../../build/mjpc/tasks/quadrotor/task.xml"
+model_path_quad = (
+pathlib.Path(__file__).parent.parent.parent
+/ "../../build/mjpc/tasks/quadrotor/task.xml"
 )
-model = mujoco.MjModel.from_xml_path(str(model_path))
+model_path_cart = (
+pathlib.Path(__file__).parent.parent.parent
+/ "../../build/mjpc/tasks/cartpole/task.xml"
+)
+
+model_mpc = mujoco.MjModel.from_xml_path(str(model_path_quad))
+model_sim = mujoco.MjModel.from_xml_path(str(model_path_quad))
 
 # Create data object for the simulation
-data = mujoco.MjData(model)
+data_controller = mujoco.MjData(model_mpc)  # For MPC controller
+data_simulation = mujoco.MjData(model_sim)  # For the actual simulation
 
-# Run GUI
-with agent_lib.Agent(
-    server_binary_path=pathlib.Path(agent_lib.__file__).parent
-    / "mjpc"
-    / "ui_agent_server",
-    task_id="Quadrotor",
-    model=model,
-) as agent:
+agent_mpc = agent_lib.Agent(task_id="Quadrotor", model=model_mpc)
+agent_sim = agent_lib.Agent(task_id="Quadrotor", model=model_sim)
 
-    # Renderer for visualization
-    renderer = mujoco.Renderer(model)
 
-    # Set the correct cost weights (lin vel, ang vel)
-    agent.set_cost_weights({"Lin. Vel.": 0.15})  
-    agent.set_cost_weights({"Ang. Vel.": 0.15 })
-    print("Cost weights:", agent.get_cost_weights())
-    # how to set task param
+# Renderer for visualization
+# renderer = mujoco.Renderer(model)
 
-    # Rollout horizon
-    T = 1500
+# Set the correct cost weights (lin vel, ang vel)
+agent_mpc.set_cost_weights({"Lin. Vel.": 0.15})  
+agent_mpc.set_cost_weights({"Ang. Vel.": 0.15 })
+agent_sim.set_cost_weights({"Lin. Vel.": 0.15})  
+agent_sim.set_cost_weights({"Ang. Vel.": 0.15 })
+print("Cost weights:", agent_mpc.get_cost_weights())
+# how to set task param
 
-    # Initialize arrays to store the simulation data
-    qpos = np.zeros((model.nq, T))
-    qvel = np.zeros((model.nv, T))
-    ctrl = np.zeros((model.nu, T - 1))
-    time = np.zeros(T)
+# Rollout horizon
+T = 1500
 
-    # Costs
-    cost_total = np.zeros(T - 1)
-    cost_terms = np.zeros((len(agent.get_cost_term_values()), T - 1))
+# Initialize arrays to store the simulation data
+qpos = np.zeros((model_sim.nq, T))
+qvel = np.zeros((model_sim.nv, T))
+ctrl = np.zeros((model_sim.nu, T - 1))
+time = np.zeros(T)
 
-    # Reset the simulation data
-    mujoco.mj_resetData(model, data)
+# Costs
+cost_total = np.zeros(T - 1)
+cost_terms = np.zeros((len(agent_mpc.get_cost_term_values()), T - 1))
 
-    # Cache initial state
-    qpos[:, 0] = data.qpos
-    qvel[:, 0] = data.qvel
-    time[0] = data.time
+# Reset the simulation data
+mujoco.mj_resetData(model_mpc, data_controller)
+mujoco.mj_resetData(model_sim, data_simulation)
 
-    # Initialize a list to store frames for video visualization
-    frames = []
-    FPS = 1.0 / model.opt.timestep
+# Cache initial state
+qpos[:, 0] = data_simulation.qpos
+qvel[:, 0] = data_simulation.qvel
+time[0] = data_simulation.time
 
-    # Simulation loop
-    for t in range(T - 1):
-        if t % 100 == 0:
-            print("t =", t)
+# Initialize a list to store frames for video visualization
+frames = []
+FPS = 1.0 / model_sim.opt.timestep
 
-        # Set the planner state
-        agent.set_state(
-            time=data.time,
-            qpos=data.qpos,
-            qvel=data.qvel,
-            act=data.act,
-            mocap_pos=data.mocap_pos,
-            mocap_quat=data.mocap_quat,
-            userdata=data.userdata,
-        )
+# Simulation loop
+for t in range(T - 1):
+    if t % 100 == 0:
+        print("t =", t)
 
-        # Run the planner for multiple steps
-        num_steps = 10
-        for _ in range(num_steps):
-            agent.planner_step()
+    # Set the planner state
+    agent_mpc.set_state(
+        time=data_simulation.time,
+        qpos=data_simulation.qpos,
+        qvel=data_simulation.qvel,
+        act=data_simulation.act,
+        mocap_pos=data_simulation.mocap_pos,
+        mocap_quat=data_simulation.mocap_quat,
+        userdata=data_simulation.userdata,
+    )
 
-        # Get the action from the agent and apply it as control
-        data.ctrl = agent.get_action()
-        ctrl[:, t] = data.ctrl
-        # Get and store costs
-        cost_total[t] = agent.get_total_cost()
-        for i, c in enumerate(agent.get_cost_term_values().items()):
-            cost_terms[i, t] = c[1]
+    agent_sim.set_state(
+        time=data_simulation.time,
+        qpos=data_simulation.qpos,
+        qvel=data_simulation.qvel,
+        act=data_simulation.act,
+        mocap_pos=data_simulation.mocap_pos,
+        mocap_quat=data_simulation.mocap_quat,
+        userdata=data_simulation.userdata,
+    )
 
-        # Step 
-        mujoco.mj_step(model, data)
+    # Run the planner for multiple steps
+    num_steps = 10
+    for _ in range(num_steps):
+        agent_mpc.planner_step()
+        agent_sim.planner_step()
 
-        # Cache
-        qpos[:, t + 1] = data.qpos
-        qvel[:, t + 1] = data.qvel
-        time[t + 1] = data.time
+    # Get the action from the agent and apply it as control
+    data_simulation.ctrl = agent_mpc.get_action()
+    ctrl[:, t] = data_simulation.ctrl
+    # Get and store costs
+    cost_total[t] = agent_sim.get_total_cost()
+    for i, c in enumerate(agent_sim.get_cost_term_values().items()):
+        cost_terms[i, t] = c[1]
 
-        # Update renderer and save frames for visualization
-        renderer.update_scene(data)
-        pixels = renderer.render()
-        frames.append(pixels)
+    if t == 100:    
+        model_sim.body_mass *= 100
+        print("mass *= 100 at time step 100")
 
-    # Reset agent
-    agent.reset()
 
-    # Properly delete the renderer to free resources
-    del renderer
+    # Step 
+    mujoco.mj_step(model_mpc, data_controller)
+    mujoco.mj_step(model_sim, data_simulation)
 
-    #display video
-    SLOWDOWN = 0.5
-    media.show_video(frames, fps=SLOWDOWN * FPS)
+    # Cache
+    qpos[:, t + 1] = data_simulation.qpos
+    qvel[:, t + 1] = data_simulation.qvel
+    time[t + 1] = data_simulation.time
 
-    # Plot 
-    plt.figure()
-    plt.plot(time, qpos[0, :], label="q0", color="blue")
-    plt.plot(time, qpos[1, :], label="q1", color="orange")
-    plt.legend()
-    plt.xlabel("Time (s)")
-    plt.ylabel("Configuration")
-    plt.show()
+    if t % 20 == 0: 
+        print("t = ", t, qpos[:, t])
+        # print(qvel[:, t])
+        # print(cost_total.max())
+        # print(cost_total.min())
 
-    # Plot velocity
-    plt.figure()
-    plt.plot(time, qvel[0, :], label="v0", color="blue")
-    plt.plot(time, qvel[1, :], label="v1", color="orange")
-    plt.legend()
-    plt.xlabel("Time (s)")
-    plt.ylabel("Velocity")
-    plt.show()
+    # # Update renderer and save frames for visualization
+    # renderer.update_scene(data)
+    # pixels = renderer.render()
+    # frames.append(pixels)
 
-    # Plot control
-    plt.figure()
-    plt.plot(time[:-1], ctrl[0, :], color="blue")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Control")
-    plt.show()
+# Reset agent
+agent_mpc.reset()
+agent_sim.reset()
 
-    # Plot costs
-    plt.figure()
-    for i, c in enumerate(agent.get_cost_term_values().items()):
-        plt.plot(time[:-1], cost_terms[i, :], label=c[0])
-    plt.plot(time[:-1], cost_total, label="Total (weighted)", color="black")
-    plt.legend()
-    plt.xlabel("Time (s)")
-    plt.ylabel("Costs")
-    plt.show()
+
+#display video
+SLOWDOWN = 0.5
+media.show_video(frames, fps=SLOWDOWN * FPS)
+
+# Plot 
+plt.figure()
+plt.plot(time, qpos[0, :], label="q0", color="blue")
+plt.plot(time, qpos[1, :], label="q1", color="orange")
+plt.legend()
+plt.xlabel("Time (s)")
+plt.ylabel("Configuration")
+plt.show()
+
+# Plot velocity
+plt.figure()
+plt.plot(time, qvel[0, :], label="v0", color="blue")
+plt.plot(time, qvel[1, :], label="v1", color="orange")
+plt.legend()
+plt.xlabel("Time (s)")
+plt.ylabel("Velocity")
+plt.show()
+
+# Plot control
+plt.figure()
+plt.plot(time[:-1], ctrl[0, :], color="blue")
+plt.xlabel("Time (s)")
+plt.ylabel("Control")
+plt.show()
+
+# Plot costs
+plt.figure()
+for i, c in enumerate(agent.get_cost_term_values().items()):
+    plt.plot(time[:-1], cost_terms[i, :], label=c[0])
+plt.plot(time[:-1], cost_total, label="Total (weighted)", color="black")
+plt.legend()
+plt.xlabel("Time (s)")
+plt.ylabel("Costs")
+plt.show()
